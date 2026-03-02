@@ -278,7 +278,8 @@ if [ "$SCHEDULER" = "y" ]; then
 cat > /etc/supervisor/conf.d/scheduler.conf << SUPEOF
 [program:scheduler]
 process_name=%(program_name)s
-command=/bin/bash -c "while true; do /usr/bin/php ${APP_DIR}/artisan schedule:run --verbose --no-interaction & sleep 60; done"
+command=/usr/bin/php /var/www/laravel/artisan schedule:work --no-interaction
+directory=/var/www/laravel
 autostart=true
 autorestart=true
 user=www-data
