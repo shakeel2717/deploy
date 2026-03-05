@@ -152,6 +152,17 @@ apt install -y redis-server
 systemctl enable redis-server
 systemctl start redis-server
 
+# ---- Swap ----
+if [ ! -f /swapfile ]; then
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    echo 'vm.swappiness=10' >> /etc/sysctl.conf
+    sysctl -p
+fi
+
 # ---- Supervisor ----
 apt install -y supervisor
 systemctl enable supervisor
