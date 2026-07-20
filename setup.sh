@@ -15,14 +15,18 @@ while true; do
 done
 
 # ---- Per-site arrays ----
-declare -a S_DOMAIN S_REPO S_REPO_AUTH S_DB_NAME S_DB_USER S_DB_PASS S_APP_DIR
+declare -a S_DOMAIN S_SITE_NAME S_REPO S_REPO_AUTH S_DB_NAME S_DB_USER S_DB_PASS S_APP_DIR
 
 for i in $(seq 1 $SITE_COUNT); do
     echo ""
     echo "--- Site $i of $SITE_COUNT ---"
 
-    echo "Enter domain for site $i (e.g. site1.com):"
+    echo "Enter domain for site $i (e.g. boss.example.com):"
     read S_DOMAIN[$i]
+
+    # Extract site name from first part of domain (boss.alqaswadev.com → boss)
+    S_SITE_NAME[$i]=$(echo "${S_DOMAIN[$i]}" | cut -d'.' -f1)
+    S_APP_DIR[$i]="/var/www/${S_SITE_NAME[$i]}"
 
     echo "Enter Git repo URL for site $i:"
     read S_REPO[$i]
@@ -40,12 +44,12 @@ for i in $(seq 1 $SITE_COUNT); do
         S_REPO_AUTH[$i]="${S_REPO[$i]}"
     fi
 
-    DEFAULT_DB="site${i}_db"
+    DEFAULT_DB="${S_SITE_NAME[$i]}_db"
     echo "Database name (default: ${DEFAULT_DB}):"
     read DB_NAME_INPUT
     S_DB_NAME[$i]="${DB_NAME_INPUT:-$DEFAULT_DB}"
 
-    DEFAULT_USER="site${i}_user"
+    DEFAULT_USER="${S_SITE_NAME[$i]}_user"
     echo "Database user (default: ${DEFAULT_USER}):"
     read DB_USER_INPUT
     S_DB_USER[$i]="${DB_USER_INPUT:-$DEFAULT_USER}"
@@ -57,11 +61,9 @@ for i in $(seq 1 $SITE_COUNT); do
     else
         S_DB_PASS[$i]="$DB_PASS_INPUT"
     fi
-
-    S_APP_DIR[$i]="/var/www/site${i}"
 done
 
-# ---- Shared options (asked once) ----
+# ---- Shared options ----
 echo ""
 echo "--- Shared Server Options ---"
 
@@ -104,10 +106,7 @@ echo "  Summary"
 echo "=============================================="
 echo "  PHP         : $PHP_VER"
 echo "  Octane      : $OCTANE ${OCTANE_SERVER:-}"
-echo "  Horizon     : $HORIZON"
-echo "  Reverb      : $REVERB"
-echo "  Scheduler   : $SCHEDULER"
-echo "  Chrome      : $CHROME"
+echo "  Horizon     : $HORIZON | Reverb: $REVERB | Scheduler: $SCHEDULER | Chrome: $CHROME"
 echo "  SSL         : $SSL_MODE"
 echo ""
 for i in $(seq 1 $SITE_COUNT); do
@@ -117,32 +116,29 @@ for i in $(seq 1 $SITE_COUNT); do
     echo "    Domain  : ${S_DOMAIN[$i]}"
     echo "    Dir     : ${S_APP_DIR[$i]}"
     echo "    DB      : ${S_DB_NAME[$i]} / ${S_DB_USER[$i]} / ${S_DB_PASS[$i]}"
-    if [ "$OCTANE" = "y" ]; then echo "    Octane  : port $OCTANE_PORT"; fi
-    if [ "$REVERB" = "y" ]; then echo "    Reverb  : port $REVERB_PORT"; fi
+    [ "$OCTANE" = "y" ] && echo "    Octane  : port $OCTANE_PORT"
+    [ "$REVERB" = "y" ] && echo "    Reverb  : port $REVERB_PORT"
 done
 echo "=============================================="
 echo ""
 echo "Start installation? (y/n):"
 read CONFIRM
-if [ "$CONFIRM" != "y" ]; then echo "Aborted."; exit 1; fi
+[ "$CONFIRM" != "y" ] && echo "Aborted." && exit 1
 
 # ==============================================================
 # SYSTEM INSTALL (once)
 # ==============================================================
-echo ""
 echo "[1/5] System packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt upgrade -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef"
 apt install -y curl git unzip zip wget gnupg ca-certificates software-properties-common acl net-tools ufw
 
-# ---- App user ----
 if ! id "$APP_USER" &>/dev/null; then
     adduser --disabled-password --gecos "" $APP_USER
     usermod -aG www-data $APP_USER
     usermod -aG sudo $APP_USER
 fi
 
-# ---- PHP ----
 echo "[2/5] PHP ${PHP_VER}..."
 add-apt-repository ppa:ondrej/php -y
 apt update
@@ -150,52 +146,29 @@ apt install -y php${PHP_VER} php${PHP_VER}-fpm php${PHP_VER}-cli php${PHP_VER}-m
     php${PHP_VER}-xml php${PHP_VER}-bcmath php${PHP_VER}-curl php${PHP_VER}-zip \
     php${PHP_VER}-gd php${PHP_VER}-intl php${PHP_VER}-mysql php${PHP_VER}-redis \
     php${PHP_VER}-tokenizer php${PHP_VER}-fileinfo php${PHP_VER}-sockets
-if [ "$OCTANE_SERVER" = "swoole" ]; then
-    apt install -y php${PHP_VER}-swoole
-fi
+[ "$OCTANE_SERVER" = "swoole" ] && apt install -y php${PHP_VER}-swoole
 
-# ---- Composer ----
 curl -sS https://getcomposer.org/installer | php
 mv composer.phar /usr/local/bin/composer
 chmod +x /usr/local/bin/composer
 
-# ---- Node.js ----
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 
-# ---- Nginx ----
-apt install -y nginx
-systemctl enable nginx
-systemctl start nginx
+apt install -y nginx && systemctl enable nginx && systemctl start nginx
 
-# ---- MySQL ----
-echo "[3/5] MySQL..."
-apt install -y mysql-server
-systemctl enable mysql
-systemctl start mysql
+echo "[3/5] MySQL + Redis..."
+apt install -y mysql-server && systemctl enable mysql && systemctl start mysql
+apt install -y redis-server && systemctl enable redis-server && systemctl start redis-server
 
-# ---- Redis ----
-apt install -y redis-server
-systemctl enable redis-server
-systemctl start redis-server
-
-# ---- Swap ----
 if [ ! -f /swapfile ]; then
-    fallocate -l 2G /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
+    fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    echo 'vm.swappiness=10' >> /etc/sysctl.conf
-    sysctl -p
+    echo 'vm.swappiness=10' >> /etc/sysctl.conf && sysctl -p
 fi
 
-# ---- Supervisor ----
-apt install -y supervisor
-systemctl enable supervisor
-systemctl start supervisor
+apt install -y supervisor && systemctl enable supervisor && systemctl start supervisor
 
-# ---- Chrome ----
 if [ "$CHROME" = "y" ]; then
     apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 \
         libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libxcomposite1 \
@@ -215,7 +188,6 @@ fi
 # PER-SITE SETUP
 # ==============================================================
 echo "[4/5] Setting up sites..."
-
 rm -f /etc/nginx/sites-enabled/default
 
 for i in $(seq 1 $SITE_COUNT); do
@@ -227,21 +199,20 @@ for i in $(seq 1 $SITE_COUNT); do
     APP_DIR="${S_APP_DIR[$i]}"
     OCTANE_PORT=$((8000 + i - 1))
     REVERB_PORT=$((8080 + i - 1))
-    SITE_SLUG="site${i}"
+    SITE_SLUG="${S_SITE_NAME[$i]}"
 
     echo ""
     echo ">>> Setting up ${DOMAIN} in ${APP_DIR}..."
 
-    # ---- MySQL DB + user ----
+    # MySQL
     mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
     mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
     mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
     mysql -e "FLUSH PRIVILEGES;"
 
-    # ---- Clone repo ----
+    # Clone
     mkdir -p /var/www
     if [ -d "${APP_DIR}/.git" ]; then
-        echo "Repo exists, pulling..."
         cd $APP_DIR && git pull
     else
         git clone "$REPO_AUTH" "$APP_DIR"
@@ -249,7 +220,7 @@ for i in $(seq 1 $SITE_COUNT); do
     git config --global --add safe.directory $APP_DIR
     chown -R $APP_USER:www-data $APP_DIR
 
-    # ---- .env ----
+    # .env
     cd $APP_DIR
     if [ ! -f ".env" ]; then
         cp .env.example .env
@@ -261,13 +232,14 @@ for i in $(seq 1 $SITE_COUNT); do
         sed -i "s/APP_ENV=.*/APP_ENV=production/" .env
         sed -i "s/APP_DEBUG=.*/APP_DEBUG=false/" .env
         sed -i "s/OCTANE_SERVER=.*/OCTANE_SERVER=${OCTANE_SERVER:-roadrunner}/" .env
+        sed -i "s/QUEUE_CONNECTION=.*/QUEUE_CONNECTION=redis/" .env
         if [ "$REVERB" = "y" ]; then
             sed -i "s|VITE_REVERB_HOST=.*|VITE_REVERB_HOST=${DOMAIN}|" .env
             sed -i "s|REVERB_ALLOWED_ORIGINS=.*|REVERB_ALLOWED_ORIGINS=https://${DOMAIN}|" .env
         fi
     fi
 
-    # ---- Dependencies ----
+    # Dependencies
     sudo -u $APP_USER composer install --no-dev --optimize-autoloader
     sudo -u $APP_USER npm install
     sudo -u $APP_USER npm run build 2>/dev/null || echo "npm build skipped"
@@ -275,7 +247,7 @@ for i in $(seq 1 $SITE_COUNT); do
     php artisan migrate --force
     php artisan storage:link
 
-    # ---- Octane install ----
+    # Octane
     if [ "$OCTANE" = "y" ]; then
         sudo -u $APP_USER composer require laravel/octane 2>/dev/null || true
         sudo -u $APP_USER php artisan octane:install --server=$OCTANE_SERVER --no-interaction 2>/dev/null || true
@@ -287,13 +259,13 @@ for i in $(seq 1 $SITE_COUNT); do
         chmod 664 ${APP_DIR}/.rr.yaml
     fi
 
-    # ---- Reverb install ----
+    # Reverb
     if [ "$REVERB" = "y" ]; then
         sudo -u $APP_USER composer require laravel/reverb 2>/dev/null || true
         sudo -u $APP_USER php artisan reverb:install --no-interaction 2>/dev/null || true
     fi
 
-    # ---- Puppeteer cache (per-site if Chrome enabled) ----
+    # Chrome cache per-site
     if [ "$CHROME" = "y" ]; then
         sudo -u www-data PUPPETEER_CACHE_DIR=/var/www/.cache/puppeteer \
             npx --prefix $APP_DIR puppeteer browsers install chrome-headless-shell
@@ -302,15 +274,15 @@ for i in $(seq 1 $SITE_COUNT); do
         chmod -R 755 /var/www/.cache/puppeteer
     fi
 
-    # ---- Permissions ----
+    # Permissions
     chown -R www-data:www-data $APP_DIR
     chmod -R 775 ${APP_DIR}/storage ${APP_DIR}/bootstrap/cache
     setfacl -R -m u:$APP_USER:rwX $APP_DIR
     setfacl -R -d -m u:$APP_USER:rwX $APP_DIR
 
-    # ---- Supervisor: Octane ----
+    # Supervisor: Octane
     if [ "$OCTANE" = "y" ]; then
-cat > /etc/supervisor/conf.d/octane_${SITE_SLUG}.conf << SUPEOF
+        cat > /etc/supervisor/conf.d/octane_${SITE_SLUG}.conf << SUPEOF
 [program:octane_${SITE_SLUG}]
 process_name=%(program_name)s
 command=/usr/bin/php ${APP_DIR}/artisan octane:start --server=${OCTANE_SERVER} --host=127.0.0.1 --port=${OCTANE_PORT}
@@ -323,9 +295,9 @@ stopwaitsecs=10
 SUPEOF
     fi
 
-    # ---- Supervisor: Horizon ----
+    # Supervisor: Horizon
     if [ "$HORIZON" = "y" ]; then
-cat > /etc/supervisor/conf.d/horizon_${SITE_SLUG}.conf << SUPEOF
+        cat > /etc/supervisor/conf.d/horizon_${SITE_SLUG}.conf << SUPEOF
 [program:horizon_${SITE_SLUG}]
 process_name=%(program_name)s
 command=/usr/bin/php ${APP_DIR}/artisan horizon
@@ -338,9 +310,9 @@ stopwaitsecs=3600
 SUPEOF
     fi
 
-    # ---- Supervisor: Scheduler ----
+    # Supervisor: Scheduler
     if [ "$SCHEDULER" = "y" ]; then
-cat > /etc/supervisor/conf.d/scheduler_${SITE_SLUG}.conf << SUPEOF
+        cat > /etc/supervisor/conf.d/scheduler_${SITE_SLUG}.conf << SUPEOF
 [program:scheduler_${SITE_SLUG}]
 process_name=%(program_name)s
 command=/usr/bin/php ${APP_DIR}/artisan schedule:work --no-interaction
@@ -353,9 +325,9 @@ stdout_logfile=${APP_DIR}/storage/logs/scheduler.log
 SUPEOF
     fi
 
-    # ---- Supervisor: Reverb ----
+    # Supervisor: Reverb
     if [ "$REVERB" = "y" ]; then
-cat > /etc/supervisor/conf.d/reverb_${SITE_SLUG}.conf << SUPEOF
+        cat > /etc/supervisor/conf.d/reverb_${SITE_SLUG}.conf << SUPEOF
 [program:reverb_${SITE_SLUG}]
 process_name=%(program_name)s
 command=/usr/bin/php ${APP_DIR}/artisan reverb:start --host=127.0.0.1 --port=${REVERB_PORT}
@@ -368,30 +340,10 @@ stopwaitsecs=3600
 SUPEOF
     fi
 
-    # ---- Nginx config ----
-    if [ "$OCTANE" = "y" ]; then
-        LOCATION_BLOCK="try_files \$uri \$uri/ @octane_${SITE_SLUG};"
-        OCTANE_LOCATION="
-    location @octane_${SITE_SLUG} {
-        proxy_http_version 1.1;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://127.0.0.1:${OCTANE_PORT};
-    }"
-    else
-        LOCATION_BLOCK="try_files \$uri \$uri/ /index.php?\$query_string;"
-        OCTANE_LOCATION="
-    location ~ \.php\$ {
-        fastcgi_pass unix:/var/run/php/php${PHP_VER}-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }"
-    fi
-
+    # ---- Build Nginx config ----
+    # Reverb WebSocket block (only if enabled)
     if [ "$REVERB" = "y" ]; then
-        REVERB_LOCATION="
+        REVERB_BLOCK="
     location /app {
         proxy_http_version 1.1;
         proxy_set_header Host \$http_host;
@@ -401,11 +353,48 @@ SUPEOF
         proxy_pass http://127.0.0.1:${REVERB_PORT};
     }"
     else
-        REVERB_LOCATION=""
+        REVERB_BLOCK=""
     fi
 
+    # PHP backend block — Octane proxy OR PHP-FPM
+    if [ "$OCTANE" = "y" ]; then
+        PHP_BACKEND="
+    # Static assets: serve from disk if the file exists, otherwise fall through to Octane.
+    # This is critical for dynamic .js routes like /livewire/livewire.min.js.
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|map|webp)\$ {
+        expires max;
+        log_not_found off;
+        try_files \$uri @octane;
+    }
+
+    location / {
+        try_files \$uri @octane;
+    }
+
+    location @octane {
+        proxy_http_version 1.1;
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_pass http://127.0.0.1:${OCTANE_PORT};
+    }"
+    else
+        PHP_BACKEND="
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        fastcgi_pass unix:/var/run/php/php${PHP_VER}-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }"
+    fi
+
+    # Write nginx config (SSL or plain HTTP)
     if [ "$SSL_MODE" = "cloudflare" ] && [ -f "$SSL_CERT" ] && [ -f "$SSL_KEY" ]; then
-cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
+        cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
 server {
     listen 80;
     server_name ${DOMAIN} www.${DOMAIN};
@@ -423,54 +412,39 @@ server {
     add_header X-Content-Type-Options nosniff;
     index index.php;
     charset utf-8;
-    ${REVERB_LOCATION}
-    location / { ${LOCATION_BLOCK} }
+${REVERB_BLOCK}
+${PHP_BACKEND}
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
-    ${OCTANE_LOCATION}
-}
-NGXEOF
-    elif [ "$SSL_MODE" = "letsencrypt" ]; then
-cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
-server {
-    listen 80;
-    server_name ${DOMAIN} www.${DOMAIN};
-    root ${APP_DIR}/public;
-    index index.php;
-    charset utf-8;
-    ${REVERB_LOCATION}
-    location / { ${LOCATION_BLOCK} }
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-    ${OCTANE_LOCATION}
 }
 NGXEOF
     else
-cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
+        # HTTP only (Let's Encrypt will upgrade it, or SSL=none)
+        cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
 server {
     listen 80;
     server_name ${DOMAIN} www.${DOMAIN};
     root ${APP_DIR}/public;
     index index.php;
     charset utf-8;
-    ${REVERB_LOCATION}
-    location / { ${LOCATION_BLOCK} }
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+${REVERB_BLOCK}
+${PHP_BACKEND}
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
-    ${OCTANE_LOCATION}
 }
 NGXEOF
+        if [ "$SSL_MODE" = "letsencrypt" ]; then
+            apt install -y certbot python3-certbot-nginx
+            certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
+        fi
     fi
 
-    ln -sf /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf /etc/nginx/sites-enabled/${SITE_SLUG}_${DOMAIN}.conf
+    ln -sf /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf \
+           /etc/nginx/sites-enabled/${SITE_SLUG}_${DOMAIN}.conf
 
-    # ---- Let's Encrypt (per site) ----
-    if [ "$SSL_MODE" = "letsencrypt" ]; then
-        apt install -y certbot python3-certbot-nginx
-        certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
-    fi
-
-    # ---- Cache ----
+    # Laravel cache
     cd $APP_DIR
     php artisan config:cache
     php artisan route:cache
@@ -480,17 +454,16 @@ NGXEOF
 done
 
 # ==============================================================
-# CROSS-DB MYSQL GRANTS (only when 2+ sites share this server)
+# CROSS-DB MYSQL GRANTS (multi-site only)
 # ==============================================================
 if [ "$SITE_COUNT" -gt 1 ]; then
     echo ""
-    echo "Granting cross-database SELECT permissions (for local_database_name feature)..."
+    echo "Granting cross-database SELECT permissions..."
     for i in $(seq 1 $SITE_COUNT); do
         for j in $(seq 1 $SITE_COUNT); do
             if [ "$i" != "$j" ]; then
-                # Site i's DB user needs SELECT on site j's database
                 mysql -e "GRANT SELECT ON \`${S_DB_NAME[$j]}\`.* TO '${S_DB_USER[$i]}'@'localhost';"
-                echo "  Granted: ${S_DB_USER[$i]} → SELECT on ${S_DB_NAME[$j]}"
+                echo "  Granted: ${S_DB_USER[$i]} -> SELECT on ${S_DB_NAME[$j]}"
             fi
         done
     done
@@ -508,15 +481,8 @@ supervisorctl start all 2>/dev/null || true
 
 nginx -t && systemctl reload nginx
 
-# ---- Firewall ----
 ufw allow OpenSSH
 ufw allow 'Nginx Full'
-if [ "$REVERB" = "y" ]; then
-    for i in $(seq 1 $SITE_COUNT); do
-        REVERB_PORT=$((8080 + i - 1))
-        # Reverb runs on loopback, nginx proxies it — no need to open ufw for it
-    done
-fi
 ufw --force enable
 
 # ==============================================================
@@ -535,24 +501,24 @@ for i in $(seq 1 $SITE_COUNT); do
     echo "    DB User : ${S_DB_USER[$i]}"
     echo "    DB Pass : ${S_DB_PASS[$i]}   <-- SAVE THIS!"
     echo "    App Dir : ${S_APP_DIR[$i]}"
-    if [ "$OCTANE" = "y" ]; then echo "    Octane  : port $OCTANE_PORT"; fi
-    if [ "$REVERB" = "y" ]; then echo "    Reverb  : port $REVERB_PORT"; fi
+    [ "$OCTANE"    = "y" ] && echo "    Octane  : port $OCTANE_PORT"
+    [ "$REVERB"    = "y" ] && echo "    Reverb  : port $REVERB_PORT"
 done
 echo ""
 echo "  Supervisor commands:"
 for i in $(seq 1 $SITE_COUNT); do
-    SLUG="site${i}"
-    if [ "$OCTANE"    = "y" ]; then echo "    supervisorctl restart octane_${SLUG}"; fi
-    if [ "$HORIZON"   = "y" ]; then echo "    supervisorctl restart horizon_${SLUG}"; fi
-    if [ "$REVERB"    = "y" ]; then echo "    supervisorctl restart reverb_${SLUG}"; fi
-    if [ "$SCHEDULER" = "y" ]; then echo "    supervisorctl restart scheduler_${SLUG}"; fi
+    SLUG="${S_SITE_NAME[$i]}"
+    [ "$OCTANE"    = "y" ] && echo "    supervisorctl restart octane_${SLUG}"
+    [ "$HORIZON"   = "y" ] && echo "    supervisorctl restart horizon_${SLUG}"
+    [ "$REVERB"    = "y" ] && echo "    supervisorctl restart reverb_${SLUG}"
+    [ "$SCHEDULER" = "y" ] && echo "    supervisorctl restart scheduler_${SLUG}"
 done
 echo ""
 if [ "$SSL_MODE" = "cloudflare" ] && [ ! -f "$SSL_CERT" ]; then
-echo "  CLOUDFLARE SSL NEXT STEPS:"
-echo "  1. nano $SSL_CERT   (paste certificate)"
-echo "  2. nano $SSL_KEY    (paste private key)"
-echo "  3. nginx -t && systemctl reload nginx"
-echo "  4. Set Cloudflare SSL mode to Full (Strict)"
+    echo "  CLOUDFLARE SSL NEXT STEPS:"
+    echo "  1. nano $SSL_CERT   (paste certificate)"
+    echo "  2. nano $SSL_KEY    (paste private key)"
+    echo "  3. nginx -t && systemctl reload nginx"
+    echo "  4. Set Cloudflare SSL mode to Full (Strict)"
 fi
 echo "=============================================="
