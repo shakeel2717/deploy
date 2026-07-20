@@ -99,6 +99,31 @@ APP_USER="larasail"
 SSL_CERT="/etc/ssl/certs/cloudflare-origin.pem"
 SSL_KEY="/etc/ssl/private/cloudflare-origin.key"
 
+# If Cloudflare SSL selected, ensure certs are in place BEFORE continuing
+if [ "$SSL_MODE" = "cloudflare" ]; then
+    if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
+        echo ""
+        echo "=============================================="
+        echo "  ACTION REQUIRED: Cloudflare Origin Cert"
+        echo "=============================================="
+        echo "  Cert files not found. Please add them now:"
+        echo ""
+        echo "  1. Go to Cloudflare → SSL/TLS → Origin Server → Create Certificate"
+        echo "  2. Paste the certificate into:"
+        echo "     nano $SSL_CERT"
+        echo "  3. Paste the private key into:"
+        echo "     nano $SSL_KEY"
+        echo ""
+        echo "  Once both files are saved, press ENTER to continue..."
+        read -r _WAIT
+        if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
+            echo "ERROR: Cert files still missing. Aborting."
+            exit 1
+        fi
+        echo "Certs found. Continuing..."
+    fi
+fi
+
 # ---- Summary ----
 echo ""
 echo "=============================================="
@@ -112,7 +137,7 @@ echo ""
 for i in $(seq 1 $SITE_COUNT); do
     OCTANE_PORT=$((8000 + i - 1))
     REVERB_PORT=$((8080 + i - 1))
-    echo "  Site $i:"
+    echo "  Site $i (${S_SITE_NAME[$i]}):"
     echo "    Domain  : ${S_DOMAIN[$i]}"
     echo "    Dir     : ${S_APP_DIR[$i]}"
     echo "    DB      : ${S_DB_NAME[$i]} / ${S_DB_USER[$i]} / ${S_DB_PASS[$i]}"
@@ -192,6 +217,7 @@ rm -f /etc/nginx/sites-enabled/default
 
 for i in $(seq 1 $SITE_COUNT); do
     DOMAIN="${S_DOMAIN[$i]}"
+    SITE_NAME="${S_SITE_NAME[$i]}"
     REPO_AUTH="${S_REPO_AUTH[$i]}"
     DB_NAME="${S_DB_NAME[$i]}"
     DB_USER="${S_DB_USER[$i]}"
@@ -199,7 +225,7 @@ for i in $(seq 1 $SITE_COUNT); do
     APP_DIR="${S_APP_DIR[$i]}"
     OCTANE_PORT=$((8000 + i - 1))
     REVERB_PORT=$((8080 + i - 1))
-    SITE_SLUG="${S_SITE_NAME[$i]}"
+    SITE_SLUG="${SITE_NAME}"
 
     echo ""
     echo ">>> Setting up ${DOMAIN} in ${APP_DIR}..."
@@ -392,8 +418,8 @@ SUPEOF
     }"
     fi
 
-    # Write nginx config (SSL or plain HTTP)
-    if [ "$SSL_MODE" = "cloudflare" ] && [ -f "$SSL_CERT" ] && [ -f "$SSL_KEY" ]; then
+    # Write nginx config — always SSL since we verified certs exist above
+    if [ "$SSL_MODE" = "cloudflare" ]; then
         cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
 server {
     listen 80;
@@ -418,8 +444,7 @@ ${PHP_BACKEND}
     location = /robots.txt  { access_log off; log_not_found off; }
 }
 NGXEOF
-    else
-        # HTTP only (Let's Encrypt will upgrade it, or SSL=none)
+    elif [ "$SSL_MODE" = "letsencrypt" ]; then
         cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
 server {
     listen 80;
@@ -435,10 +460,25 @@ ${PHP_BACKEND}
     location = /robots.txt  { access_log off; log_not_found off; }
 }
 NGXEOF
-        if [ "$SSL_MODE" = "letsencrypt" ]; then
-            apt install -y certbot python3-certbot-nginx
-            certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
-        fi
+        apt install -y certbot python3-certbot-nginx
+        certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
+    else
+        # SSL=none
+        cat > /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf << NGXEOF
+server {
+    listen 80;
+    server_name ${DOMAIN} www.${DOMAIN};
+    root ${APP_DIR}/public;
+    index index.php;
+    charset utf-8;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+${REVERB_BLOCK}
+${PHP_BACKEND}
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+}
+NGXEOF
     fi
 
     ln -sf /etc/nginx/sites-available/${SITE_SLUG}_${DOMAIN}.conf \
@@ -496,7 +536,7 @@ for i in $(seq 1 $SITE_COUNT); do
     OCTANE_PORT=$((8000 + i - 1))
     REVERB_PORT=$((8080 + i - 1))
     echo ""
-    echo "  Site $i: https://${S_DOMAIN[$i]}"
+    echo "  Site ${S_SITE_NAME[$i]}: https://${S_DOMAIN[$i]}"
     echo "    DB Name : ${S_DB_NAME[$i]}"
     echo "    DB User : ${S_DB_USER[$i]}"
     echo "    DB Pass : ${S_DB_PASS[$i]}   <-- SAVE THIS!"
@@ -514,11 +554,8 @@ for i in $(seq 1 $SITE_COUNT); do
     [ "$SCHEDULER" = "y" ] && echo "    supervisorctl restart scheduler_${SLUG}"
 done
 echo ""
-if [ "$SSL_MODE" = "cloudflare" ] && [ ! -f "$SSL_CERT" ]; then
-    echo "  CLOUDFLARE SSL NEXT STEPS:"
-    echo "  1. nano $SSL_CERT   (paste certificate)"
-    echo "  2. nano $SSL_KEY    (paste private key)"
-    echo "  3. nginx -t && systemctl reload nginx"
-    echo "  4. Set Cloudflare SSL mode to Full (Strict)"
+if [ "$SSL_MODE" = "cloudflare" ]; then
+    echo "  CLOUDFLARE REMINDER:"
+    echo "  Set Cloudflare SSL mode to Full (Strict) for all sites on this domain."
 fi
 echo "=============================================="
