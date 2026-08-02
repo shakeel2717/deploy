@@ -259,9 +259,35 @@ for i in $(seq 1 $SITE_COUNT); do
         sed -i "s/APP_DEBUG=.*/APP_DEBUG=false/" .env
         sed -i "s/OCTANE_SERVER=.*/OCTANE_SERVER=${OCTANE_SERVER:-roadrunner}/" .env
         sed -i "s/QUEUE_CONNECTION=.*/QUEUE_CONNECTION=redis/" .env
+
+        # --- Redis isolation: each site gets its own DB pair ---
+        # Site 1 -> DB 0 / cache 1,  Site 2 -> DB 2 / cache 3, etc.
+        REDIS_DB_IDX=$(( (i - 1) * 2 ))
+        REDIS_CACHE_DB_IDX=$(( (i - 1) * 2 + 1 ))
+        if grep -q "^REDIS_DB=" .env; then
+            sed -i "s/^REDIS_DB=.*/REDIS_DB=${REDIS_DB_IDX}/" .env
+        else
+            echo "REDIS_DB=${REDIS_DB_IDX}" >> .env
+        fi
+        if grep -q "^REDIS_CACHE_DB=" .env; then
+            sed -i "s/^REDIS_CACHE_DB=.*/REDIS_CACHE_DB=${REDIS_CACHE_DB_IDX}/" .env
+        else
+            echo "REDIS_CACHE_DB=${REDIS_CACHE_DB_IDX}" >> .env
+        fi
+
         if [ "$REVERB" = "y" ]; then
             sed -i "s|VITE_REVERB_HOST=.*|VITE_REVERB_HOST=${DOMAIN}|" .env
+            sed -i "s|REVERB_PORT=.*|REVERB_PORT=${REVERB_PORT}|" .env
+            sed -i "s|VITE_REVERB_PORT=.*|VITE_REVERB_PORT=443|" .env
             sed -i "s|REVERB_ALLOWED_ORIGINS=.*|REVERB_ALLOWED_ORIGINS=https://${DOMAIN}|" .env
+            # --- Unique Reverb credentials per site ---
+            REVERB_APP_ID=$(cat /dev/urandom | tr -dc '0-9' | fold -w 6 | head -n 1)
+            REVERB_APP_KEY=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 20 | head -n 1)
+            REVERB_APP_SECRET=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 40 | head -n 1)
+            sed -i "s/^REVERB_APP_ID=.*/REVERB_APP_ID=${REVERB_APP_ID}/" .env
+            sed -i "s/^REVERB_APP_KEY=.*/REVERB_APP_KEY=${REVERB_APP_KEY}/" .env
+            sed -i "s/^REVERB_APP_SECRET=.*/REVERB_APP_SECRET=${REVERB_APP_SECRET}/" .env
+            sed -i "s/^VITE_REVERB_APP_KEY=.*/VITE_REVERB_APP_KEY=${REVERB_APP_KEY}/" .env
         fi
     fi
 
