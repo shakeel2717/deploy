@@ -1,7 +1,7 @@
 #!/bin/bash
 ###############################################################################
 #  Laravel Multi-Site Setup Wizard  —  idempotent / safe to re-run
-#  Ubuntu 22.04 / 24.04  •  Laravel 12  •  Octane + Horizon + Reverb + Scheduler
+#  Ubuntu 22.04 / 24.04  •  Laravel 12/13  •  Octane + Horizon + Reverb + Scheduler
 #
 #  Usage:
 #    ./deploy.sh                 install new site(s) / redeploy existing ones
@@ -23,6 +23,9 @@ CRED_FILE="/root/laravel-sites-credentials.txt"
 BACKUP_DIR="/root/removed-sites"
 LOCK_FILE="$STATE_DIR/.lock"
 SUP_DIR="/etc/supervisor/conf.d"
+
+# Octane defaults to one worker per CPU, and a slow download ties one up.
+OCTANE_WORKERS=8
 
 DEFAULT_SSL_CERT="/etc/ssl/certs/cloudflare-origin.pem"
 DEFAULT_SSL_KEY="/etc/ssl/private/cloudflare-origin.key"
@@ -512,10 +515,10 @@ REDIS_MAX_DB=$(redis_max_db)
 # Both lists are unions of several sources, so the same port / db index shows up
 # more than once. Dedupe before anything counts them.
 PORTS_IN_USE="$(echo "$PORTS_IN_USE" | tr ' ' '
-' | grep -E '^[0-9]+$' | sort -un | tr '
+' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '
 ' ' ')"
 REDIS_IN_USE="$(echo "$REDIS_IN_USE" | tr ' ' '
-' | grep -E '^[0-9]+$' | sort -un | tr '
+' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '
 ' ' ')"
 
 if [ ${#EXISTING_SITES[@]} -gt 0 ]; then
@@ -665,7 +668,7 @@ done
 ###############################################################################
 echo ""
 echo "--- Server Options ---"
-read -rp "PHP version [8.3]: " PHP_VER; PHP_VER=${PHP_VER:-8.3}
+read -rp "PHP version [8.4]: " PHP_VER; PHP_VER=${PHP_VER:-8.4}
 
 OCTANE_SERVER=""
 read -rp "Install Laravel Octane? [Y/n]: " V; [[ "${V:-y}" =~ ^[Yy]$ ]] && OCTANE=y || OCTANE=n
@@ -691,13 +694,13 @@ read -rp "Configure DigitalOcean Spaces for off-site backups? [Y/n]: " V
 if [[ "${V:-y}" =~ ^[Yy]$ ]]; then
     # Offer whatever an existing site already uses, so all sites stay in sync.
     EX_KEY=$(grep -h '^DO_SPACES_KEY=' "$WEB_ROOT"/*/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '
-"')
+"' || true)
     EX_SECRET=$(grep -h '^DO_SPACES_SECRET=' "$WEB_ROOT"/*/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '
-"')
+"' || true)
     EX_REGION=$(grep -h '^DO_SPACES_REGION=' "$WEB_ROOT"/*/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '
-"')
+"' || true)
     EX_BUCKET=$(grep -h '^DO_SPACES_BUCKET=' "$WEB_ROOT"/*/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '
-"')
+"' || true)
 
     if [ -n "$EX_KEY" ]; then
         note "reusing the Spaces credentials already configured on this server"
@@ -722,8 +725,8 @@ if [ -f "$PROVISION_MARKER" ]; then
 fi
 
 if [ "$RUN_SYSTEM" = "n" ] && [ ! -d "/etc/php/$PHP_VER" ]; then
-    die "PHP $PHP_VER is not installed and you declined the system install.
-     Installed versions: $(ls /etc/php 2>/dev/null | tr '\n' ' ')"
+    note "PHP $PHP_VER is not installed yet, so the system install will run anyway."
+    RUN_SYSTEM=y
 fi
 
 ###############################################################################
@@ -966,6 +969,9 @@ fi
 ###############################################################################
 #  [3/6] Per-site setup
 ###############################################################################
+# composer runs as plain `php`: with two versions installed that can be the old one.
+update-alternatives --set php "/usr/bin/php${PHP_VER}" >/dev/null 2>&1 || true
+
 echo "[3/6] Setting up sites..."
 
 HTTP2_STYLE=$(nginx_http2_directive)
@@ -1060,6 +1066,8 @@ for i in $(seq 1 "$SITE_COUNT"); do
         env_set APP_DEBUG             false                    .env
         env_set APP_URL               "https://${DOMAIN}"      .env
         env_set ASSET_URL             "https://${DOMAIN}"      .env
+        env_set DB_CONNECTION         mysql                    .env
+        env_set DB_HOST               127.0.0.1                .env
         env_set DB_DATABASE           "${S_DB_NAME[$i]}"       .env
         env_set DB_USERNAME           "${S_DB_USER[$i]}"       .env
         env_set DB_PASSWORD           "${S_DB_PASS[$i]}"       .env
@@ -1189,7 +1197,7 @@ for i in $(seq 1 "$SITE_COUNT"); do
     if [ "$OCTANE" = "y" ]; then
         as_web php${PHP_VER} artisan octane:install --server="$OCTANE_SERVER" --no-interaction || true
         if [ "$OCTANE_SERVER" = "roadrunner" ] && [ ! -f "${APP_DIR}/rr" ]; then
-            as_web ./vendor/bin/rr get-binary || true
+            as_web ./vendor/bin/rr get-binary --no-interaction || true
         fi
         [ -f .rr.yaml ] || touch .rr.yaml
         chown www-data:www-data .rr.yaml && chmod 664 .rr.yaml
@@ -1222,7 +1230,7 @@ for i in $(seq 1 "$SITE_COUNT"); do
     #  Supervisor
     ###########################################################################
     [ "$OCTANE" = "y" ] && write_prog octane \
-        "/usr/bin/php${PHP_VER} ${APP_DIR}/artisan octane:start --server=${OCTANE_SERVER} --host=127.0.0.1 --port=${OPORT}" 10 "$SLUG" "$APP_DIR"
+        "/usr/bin/php${PHP_VER} ${APP_DIR}/artisan octane:start --server=${OCTANE_SERVER} --workers=${OCTANE_WORKERS} --host=127.0.0.1 --port=${OPORT}" 10 "$SLUG" "$APP_DIR"
     [ "$HORIZON" = "y" ] && write_prog horizon \
         "/usr/bin/php${PHP_VER} ${APP_DIR}/artisan horizon" 3600 "$SLUG" "$APP_DIR"
     [ "$SCHEDULER" = "y" ] && write_prog scheduler \
@@ -1430,7 +1438,7 @@ nginx_apply
 
 # Keep whatever port sshd actually listens on rather than assuming 22, so
 # enabling ufw cannot lock us out of the box.
-SSH_PORT=$(grep -E '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+SSH_PORT=$(grep -E '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || true)
 [ -z "$SSH_PORT" ] && SSH_PORT=22
 ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
 ufw allow OpenSSH >/dev/null 2>&1 || true
@@ -1451,7 +1459,7 @@ for i in $(seq 1 "$SITE_COUNT"); do
     echo ""
     echo "  ${S_DOMAIN[$i]}"
     for p in $(site_programs "$SLUG"); do
-        ST=$(supervisorctl status "$p" 2>/dev/null | awk '{print $2}')
+        ST=$(supervisorctl status "$p" 2>/dev/null | awk '{print $2}' || true)
         if [ "$ST" = "RUNNING" ]; then
             echo "    OK    $p"
         else
